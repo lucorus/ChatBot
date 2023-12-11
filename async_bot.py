@@ -2,7 +2,7 @@ from discord.ext import commands
 from datetime import datetime
 from config import *
 import requests
-import psycopg2
+import asyncpg
 import discord
 import asyncio
 import random
@@ -12,48 +12,16 @@ intents = discord.Intents.all()
 
 bot = commands.Bot('!', intents=intents)
 
-# Подключение к базе данных
-try:
-    connection = psycopg2.connect(
-        host=host,
-        user=user,
-        password=password,
-        database=db_name
-    )
 
-    cursor = connection.cursor()
-    connection.autocommit = True
-    cursor.execute(
-        '''
-        CREATE TABLE IF NOT EXISTS users (
-        uuid TEXT PRIMARY KEY,
-        user_id TEXT,
-        points bigint,
-        last_message_time INTEGER,
-        payment bigint,
-        server_id bigint,
-        server_name TEXT,
-        server_icon TEXT,
-        user_name TEXT,
-        user_icon TEXT
+async def create_connect():
+    try:
+        conn = await asyncpg.connect(
+            user=user, password=password,
+            database=db_name, host=host
         )
-        '''
-    )
-
-    cursor.execute(
-        '''
-        CREATE TABLE IF NOT EXISTS assortment (
-        uuid TEXT PRIMARY KEY,
-        title TEXT, 
-        upgrade INTEGER, 
-        price INTEGER,
-        server_id bigint
-        )
-        '''
-    )
-
-except Exception as ex:
-    print('POSTGRESQL: ', ex)
+        return conn
+    except:
+        print('Проблема с подключением к бд')
 
 
 @bot.event
@@ -62,33 +30,24 @@ async def on_ready():
         await asyncio.sleep(60)
 
 
-@bot.event
-async def on_disconnect():
-    if connection:
-        cursor.close()
-        connection.close()
-        print('PostgreSQL connection closed')
-
-
 @bot.command(name='update_info')
 async def update_user_info(ctx):
     try:
-        cursor.execute(
+        conn = await create_connect()
+        user_data = await conn.fetch(
             '''
-            SELECT * FROM users WHERE user_id=%s AND server_id=%s LIMIT 1;
-            ''', (str(ctx.author.id), str(ctx.guild.id))
+            SELECT * FROM users WHERE user_id=$1 AND server_id=$2 LIMIT 1;
+            ''', str(ctx.author.id), str(ctx.guild.id)
         )
-        user_data = cursor.fetchone()
-        print(user_data)
+        user_data = user_data[0]
+
         if user_data[8] != str(ctx.author):
-            cursor.execute('UPDATE users SET user_name=%s WHERE user_id=%s',
-                       (str(ctx.author), str(ctx.author.id)))
-            connection.commit()
+            await conn.execute('UPDATE users SET user_name=$1 WHERE user_id=$2',
+                       str(ctx.author), str(ctx.author.id))
 
         if user_data[9] != str(ctx.author.avatar):
-            cursor.execute('UPDATE users SET user_icon=%s WHERE user_id=%s',
-                       (str(ctx.author.avatar), str(ctx.author.id)))
-            connection.commit()
+            conn.execute('UPDATE users SET user_icon=$1 WHERE user_id=$2',
+                       str(ctx.author.avatar), str(ctx.author.id))
         await ctx.send('Данные обновлены!')
     except:
         await ctx.send('Произошла неизвестная ошибка')
@@ -98,21 +57,20 @@ async def update_user_info(ctx):
 async def update_server_fields(ctx):
     try:
         if ctx.author.guild_permissions.administrator:
-            cursor.execute('''
-            SELECT * FROM users WHERE server_id=%s LIMIT 1;
-            ''', (str(ctx.guild.id), ))
-            server_data = cursor.fetchone()
-            print(server_data)
+            conn = await create_connect()
+            server_data = await conn.fetch('''
+            SELECT * FROM users WHERE server_id=$1 LIMIT 1;
+            ''', str(ctx.guild.id))
+            server_data = server_data[0]
+
             if server_data[6] != str(ctx.guild.name):
                 print('имя сервера изменено')
-                cursor.execute('UPDATE users SET server_name=%s WHERE server_id=%s',
-                       (str(ctx.guild.name), str(ctx.guild.id)))
-                connection.commit()
+                await conn.execute('UPDATE users SET server_name=$1 WHERE server_id=$2',
+                       str(ctx.guild.name), str(ctx.guild.id))
             if server_data[7] != str(ctx.guild.icon):
                 print('аватар сервера изменён')
-                cursor.execute('UPDATE users SET server_icon=%s WHERE server_id=%s',
-                       (str(ctx.guild.icon), str(ctx.guild.id)))
-                connection.commit()
+                await conn.execute('UPDATE users SET server_icon=$1 WHERE server_id=$2',
+                       str(ctx.guild.icon), str(ctx.guild.id))
             await ctx.send('Данные сервера успешно обновлены!')
         else:
             await ctx.send('У вас нет прав для этого действия')
@@ -131,19 +89,20 @@ async def on_message(message):
         и тогда аккаунт на сервере станет привязан к записи дискорд
         '''
         if message.channel.type == discord.ChannelType.private:
-            requests.post(f'http://127.0.0.1:8000/authorize_user', data={'token': str(message.content), 'user': str(message.author.id), 'access_token': access_token})
+            requests.post(f'http://127.0.0.1:8000/authorize_user', headers={'token': str(message.content), 'user': str(message.author.id), 'access': str(access_token)})
             await message.channel.send('Ваш запрос отправлен на сервер')
 
         # Получение данных пользователя из базы данных
-        cursor.execute("SELECT * FROM users WHERE user_id=%s AND server_id=%s", (str(message.author.id), message.guild.id))
-        user_data = cursor.fetchone()
+        conn = await create_connect()
+        user_data = await conn.fetch("SELECT * FROM users WHERE user_id=$1 AND server_id=$2", str(message.author.id), message.guild.id)
+        user_data = user_data[0]
 
         if user_data is None:
             # Если пользователь не найден, добавляем его в базу данных
-            cursor.execute("INSERT INTO users VALUES (%s, %s, %s, %s, 1, %s, %s, %s, %s, %s)",
-                           (str(uuid.uuid4()), str(message.author.id), 0, int(datetime.utcnow().timestamp()),
+            await conn.execute("INSERT INTO users VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                           str(uuid.uuid4()), str(message.author.id), 0, int(datetime.utcnow().timestamp()), 1,
                             message.guild.id, str(message.guild.name), str(message.guild.icon), str(message.author),
-                            str(message.author.avatar)))
+                            str(message.author.avatar))
         else:
             # Если пользователь найден, проверяем время последнего сообщения
             last_message_time = user_data[3]
@@ -152,24 +111,22 @@ async def on_message(message):
 
             # Если прошло больше минуты, добавляем баллы и обновляем время последнего сообщения
             if time_difference > 60:
-                cursor.execute("UPDATE users SET points=%s, last_message_time=%s WHERE user_id=%s AND server_id=%s",
-                               (user_data[2] + user_data[4], current_time, str(message.author.id), message.guild.id))
-
-        connection.commit()
+                await conn.execute("UPDATE users SET points=$1, last_message_time=$2 WHERE user_id=$3 AND server_id=$4",
+                             (user_data[2] + user_data[4]), current_time, str(message.author.id), message.guild.id)
         await bot.process_commands(message)
     except Exception as ex:
         print(ex)
-        print('text')
         pass
 
 
 @bot.command(name='points')
 async def get_user_points(ctx, user: discord.Member = None):
     try:
+        conn = await create_connect()
         if not user:
             user = ctx.author
-        cursor.execute("SELECT points FROM users WHERE user_id=%s AND server_id=%s", (str(user.id), ctx.guild.id))
-        result = cursor.fetchone()
+        result = await conn.fetch("SELECT points FROM users WHERE user_id=$1 AND server_id=$2", str(user.id), ctx.guild.id)
+        result = result[0]
         if result:
             await ctx.send(f"Количество баллов у {user.mention}: {result[0]}")
         else:
@@ -179,14 +136,15 @@ async def get_user_points(ctx, user: discord.Member = None):
         await ctx.send('Произошла неизвестная ошибка')
 
 
-# Получаем количество получаемых баллов за сообщение пользователя
+#Получаем количество получаемых баллов за сообщение пользователя
 @bot.command(name='payment')
 async def get_user_payment(ctx, user: discord.Member = None):
     try:
+        conn = await create_connect()
         if not user:
             user = ctx.author
-        cursor.execute("SELECT payment FROM users WHERE user_id=%s AND server_id=%s", (str(user.id), ctx.guild.id))
-        result = cursor.fetchone()
+        result = await conn.fetch("SELECT payment FROM users WHERE user_id=$1 AND server_id=$2", str(user.id), ctx.guild.id)
+        result = result[0]
         if result:
             await ctx.send(f"Количество баллов за сообщение у {user.mention}: {result[0]}")
         else:
@@ -199,42 +157,43 @@ async def get_user_payment(ctx, user: discord.Member = None):
 @bot.command(name='buy')
 async def buy(ctx, user: discord.Member, title: str):
     try:
+        conn = await create_connect()
         if not user:
             user = ctx.author
 
         # берём данные пользователя, которому будут покупать товар, чтобы проверить его наличие
-        cursor.execute("SELECT * FROM users WHERE user_id=%s AND server_id=%s", (str(user.id), ctx.guild.id))
-        if cursor.fetchone() == None:
+        user_data = await conn.fetch("SELECT * FROM users WHERE user_id=$1 AND server_id=$2", str(user.id), ctx.guild.id)
+        user_data = user_data[0]
+        print('user_data - ', user_data)
+        if user_data == None:
             raise Exception('Данного пользователя нет в базе данных')
 
         # берём данные покупающего пользователя
-        cursor.execute("SELECT * FROM users WHERE user_id=%s AND server_id=%s", (str(ctx.author.id), ctx.guild.id))
-        buyer = cursor.fetchone()
+        buyer = await conn.fetch("SELECT * FROM users WHERE user_id=$1 AND server_id=$2", str(ctx.author.id), ctx.guild.id)
+        buyer = buyer[0]
         # берём данные товара
-        cursor.execute('SELECT * FROM assortment WHERE title=%s AND server_id=%s', (title, ctx.guild.id))
-        item = cursor.fetchone()
+        item = await conn.fetch('SELECT * FROM assortment WHERE title=$1 AND server_id=$2', title, ctx.guild.id)
+        item = item[0]
 
         # если такой товар существует, то забираем его стоимость и увеличиваем кол-во баллов за сообщение
         if item != None:
             # если у покупающего баллов больше, чем нужно (или ровно столько), то он может купить
-            if int(buyer[2]) >= int(item[3]):
-
+            if int(buyer[2]) >= item[3]:
                 # забираем баллы у купившего
-                cursor.execute("UPDATE users SET points=%s WHERE user_id=%s AND server_id=%s",
-                               (int(buyer[2]) - int(item[3]), str(ctx.author.id), ctx.guild.id))
+                await conn.execute("UPDATE users SET points=$1 WHERE user_id=$2 AND server_id=$3",
+                               int(buyer[2]) - int(item[3]), str(ctx.author.id), ctx.guild.id)
 
                 # изменяем кол-во баллов за сообщение пользователю
-                cursor.execute("SELECT * FROM users WHERE user_id=%s AND server_id=%s", (str(user.id), ctx.guild.id))
-                user_data = cursor.fetchone()
-
-                cursor.execute("UPDATE users SET payment=%s WHERE user_id=%s AND server_id=%s",
-                               (int(user_data[4]) + int(item[2]), str(user.id), ctx.guild.id))
-                connection.commit()
+                await conn.execute("UPDATE users SET payment=$1 WHERE user_id=$2 AND server_id=$3",
+                               int(user_data[4]) + int(item[2]), str(user.id), ctx.guild.id)
                 await ctx.send(f'{user.name} теперь получает больше баллов за сообщение!')
             else:
                 await ctx.send('У вас нет нужного количества баллов')
         else:
             await ctx.send('Товар не найден')
+    except IndexError:
+        # возникает если таблица assortment для данного дискорд сервера пуста
+        await ctx.send('Предметы данного дискорд сервера не найдены в базе данных')
     except Exception as ex:
         await ctx.send('Произошла ошибка')
         print(ex)
@@ -245,9 +204,9 @@ async def buy(ctx, user: discord.Member, title: str):
 async def add_item(ctx, title: str, upgrade: int, price: int):
     try:
         if ctx.author.guild_permissions.administrator:
-            cursor.execute("INSERT INTO assortment VALUES (%s, %s, %s, %s, %s)",
-                           (str(uuid.uuid4()), title, upgrade, price, ctx.guild.id))
-            connection.commit()
+            conn = await create_connect()
+            await conn.execute("INSERT INTO assortment VALUES ($1, $2, $3, $4, $5)",
+                           str(uuid.uuid4()), title, upgrade, price, ctx.guild.id)
             await ctx.send(f'Товар с названием {title} был добавлен, его цена = {price}, '
                            f'он добавляет к получаемым баллам за сообщение {upgrade} баллов ')
         else:
@@ -260,12 +219,13 @@ async def add_item(ctx, title: str, upgrade: int, price: int):
 @bot.command(name='assortment')
 async def see_assortment(ctx):
     try:
-        cursor.execute("SELECT * FROM assortment WHERE server_id=%s", (ctx.guild.id,))
-        if cursor.fetchone() == None or len(cursor.fetchall()) == 0:
+        conn = await create_connect()
+        assortment = await conn.fetch("SELECT * FROM assortment WHERE server_id=$1", ctx.guild.id,)
+        if assortment == None or len(assortment) == 0:
             await ctx.send('Товаров нет')
         else:
             assort = 'Список товаров: \n'
-            for item in cursor.fetchall():
+            for item in assortment:
                 assort += f'{item[1]} имеет цену {item[3]} и добавляет {item[2]} баллов за сообщение \n'
             await ctx.send(assort)
     except Exception as ex:
@@ -275,9 +235,10 @@ async def see_assortment(ctx):
 @bot.command(name='delete_item')
 async def delete_item(ctx, title):
     try:
+        conn = await create_connect()
         if ctx.author.guild_permissions.administrator:
-            cursor.execute("DELETE FROM assortment WHERE title=%s AND server_id=%s", (title, ctx.guild.id))
-            connection.commit()
+            await conn.execute("DELETE FROM assortment WHERE title=$1 AND server_id=$2", title, ctx.guild.id)
+            #connection.commit()
             await ctx.send('Товар успешно удалён')
         else:
             await ctx.send('У вас недостаточно прав для этого действия')
@@ -289,17 +250,36 @@ async def delete_item(ctx, title):
 @bot.command(name='add_points')
 async def add_points(ctx, user: discord.Member, num):
     try:
-        if str(ctx.author.id) == '854253015862607872':
+        if ctx.author.guild_permissions.administrator:
+            conn = await create_connect()
             num = int(num)
-            cursor.execute("SELECT * FROM users WHERE user_id=%s AND server_id=%s", (str(user.id), ctx.guild.id))
-            user_data = cursor.fetchone()
-            cursor.execute("UPDATE users SET points=%s WHERE user_id=%s AND server_id=%s",
-                           ((user_data[2] + num), str(user.id), ctx.guild.id))
-            connection.commit()
+            user_data = await conn.fetch("SELECT * FROM users WHERE user_id=$1 AND server_id=$2", str(user.id), ctx.guild.id)
+            user_data = user_data[0]
+            await conn.execute("UPDATE users SET points=$1 WHERE user_id=$2 AND server_id=$3",
+                           (user_data[2] + num), str(user.id), ctx.guild.id)
             await ctx.send('Действие успешно выполнено!')
         else:
             await ctx.send('У вас недостаточно прав для этого действия')
-    except:
+    except Exception as ex:
+        print(ex)
+        await ctx.send('Произошла неизвестная ошибка')
+
+
+@bot.command(name='add_payment')
+async def add_payment(ctx, user: discord.Member, num):
+    try:
+        if ctx.author.guild_permissions.administrator:
+            conn = await create_connect()
+            num = int(num)
+            user_data = await conn.fetch("SELECT * FROM users WHERE user_id=$1 AND server_id=$2", str(user.id), ctx.guild.id)
+            user_data = user_data[0]
+            await conn.execute("UPDATE users SET payment=$1 WHERE user_id=$2 AND server_id=$3",
+                               (int(user_data[4]) + num), str(user.id), ctx.guild.id)
+            await ctx.send('Действие успешно выполнено!')
+        else:
+            await ctx.send('У вас недостаточно прав для этого действия')
+    except Exception as ex:
+        print(ex)
         await ctx.send('Произошла неизвестная ошибка')
 
 
@@ -348,8 +328,9 @@ async def casino(ctx, bet):
         if type(bet) == bool:
             raise Exception('Ставка не валидна')
 
-        cursor.execute('SELECT * FROM users WHERE user_id=%s AND server_id=%s', (str(ctx.author.id), ctx.guild.id))
-        user_data = cursor.fetchone()
+        conn = await create_connect()
+        user_data = await conn.fetch('SELECT * FROM users WHERE user_id=$1 AND server_id=$2', str(ctx.author.id), ctx.guild.id)
+        user_data = user_data[0]
 
         # проверяем количество баллов пользователя
         if user_data[2] >= bet:
@@ -358,24 +339,22 @@ async def casino(ctx, bet):
             count_figure = max_count_figure(number)
 
             if count_figure == 1:
-                cursor.execute("UPDATE users SET points=%s WHERE user_id=%s AND server_id=%s",
-                               (user_data[2] - bet, str(ctx.author.id), ctx.guild.id))
+                await conn.execute("UPDATE users SET points=$1 WHERE user_id=$2 AND server_id=$3",
+                               user_data[2] - bet, str(ctx.author.id), ctx.guild.id)
                 if bet >= 1000:
                     await ctx.reply(f'Выпало число {number} \nВы проиграли {bet} баллов ))))')
                 else:
                     await ctx.reply(f'Выпало число {number} \nВы проиграли {bet} баллов')
 
             elif count_figure == 2:
-                cursor.execute("UPDATE users SET points=%s WHERE user_id=%s AND server_id=%s",
-                               (user_data[2] + ((bet * 2) // 1), str(ctx.author.id), ctx.guild.id))
-                await ctx.reply(f'Выпало число {number} \nВы выиграли {int((bet * 1.5) // 1)} баллов!')
+                await conn.execute("UPDATE users SET points=$1 WHERE user_id=$2 AND server_id=$3",
+                               user_data[2] + ((bet * 2) // 1), str(ctx.author.id), ctx.guild.id)
+                await ctx.reply(f'Выпало число {number} \nВы выиграли {int((bet * 2) // 1)} баллов!')
 
             elif count_figure == 3:
-                cursor.execute("UPDATE users SET points=%s WHERE user_id=%s AND server_id=%s",
-                               (user_data[2] + (bet * 4), str(ctx.author.id), ctx.guild.id))
-                await ctx.reply(f'Выпало число {number} \nВы выиграли {bet * 3} баллов!')
-
-            connection.commit()
+                await conn.execute("UPDATE users SET points=$1 WHERE user_id=$2 AND server_id=$3",
+                               user_data[2] + (bet * 4), str(ctx.author.id), ctx.guild.id)
+                await ctx.reply(f'Выпало число {number} \nВы выиграли {bet * 4} баллов!')
 
         else:
             await ctx.reply('У вас не хватает баллов для этой ставки')
@@ -386,4 +365,3 @@ async def casino(ctx, bet):
 
 # Запуск бота
 bot.run(token)
-
