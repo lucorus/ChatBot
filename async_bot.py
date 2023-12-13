@@ -41,10 +41,12 @@ async def update_user_info(ctx):
         )
         user_data = user_data[0]
 
+        # обновление имени пользователя
         if user_data[8] != str(ctx.author):
             await conn.execute('UPDATE users SET user_name=$1 WHERE user_id=$2',
                        str(ctx.author), str(ctx.author.id))
 
+        # обновление иконки пользователя
         if user_data[9] != str(ctx.author.avatar):
             conn.execute('UPDATE users SET user_icon=$1 WHERE user_id=$2',
                        str(ctx.author.avatar), str(ctx.author.id))
@@ -63,12 +65,13 @@ async def update_server_fields(ctx):
             ''', str(ctx.guild.id))
             server_data = server_data[0]
 
+            # Изменение названия сервера
             if server_data[6] != str(ctx.guild.name):
-                print('имя сервера изменено')
                 await conn.execute('UPDATE users SET server_name=$1 WHERE server_id=$2',
                        str(ctx.guild.name), str(ctx.guild.id))
+
+            # Изменение картинки сервера
             if server_data[7] != str(ctx.guild.icon):
-                print('аватар сервера изменён')
                 await conn.execute('UPDATE users SET server_icon=$1 WHERE server_id=$2',
                        str(ctx.guild.icon), str(ctx.guild.id))
             await ctx.send('Данные сервера успешно обновлены!')
@@ -89,30 +92,34 @@ async def on_message(message):
         и тогда аккаунт на сервере станет привязан к записи дискорд
         '''
         if message.channel.type == discord.ChannelType.private:
-            requests.post(f'http://127.0.0.1:8000/authorize_user', headers={'token': str(message.content), 'user': str(message.author.id), 'access': str(access_token)})
+            requests.post(f'http://127.0.0.1:8000/authorize_user',
+                          headers={'token': str(message.content),
+                                   'user': str(message.author.id),
+                                   'access': str(access_token)
+                                   }
+                          )
             await message.channel.send('Ваш запрос отправлен на сервер')
 
         # Получение данных пользователя из базы данных
         conn = await create_connect()
         user_data = await conn.fetch("SELECT * FROM users WHERE user_id=$1 AND server_id=$2", str(message.author.id), message.guild.id)
-        user_data = user_data[0]
-
-        if user_data is None:
+        if user_data == []:
             # Если пользователь не найден, добавляем его в базу данных
-            await conn.execute("INSERT INTO users VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-                           str(uuid.uuid4()), str(message.author.id), 0, int(datetime.utcnow().timestamp()), 1,
+            await conn.execute("INSERT INTO users VALUES ($1, $2, $3, $4, 1, $5, $6, $7, $8, $9, 1)",
+                           str(uuid.uuid4()), str(message.author.id), 1, int(datetime.utcnow().timestamp()),
                             message.guild.id, str(message.guild.name), str(message.guild.icon), str(message.author),
                             str(message.author.avatar))
         else:
+            user_data = user_data[0]
+
             # Если пользователь найден, проверяем время последнего сообщения
             last_message_time = user_data[3]
             current_time = int(datetime.utcnow().timestamp())
             time_difference = current_time - last_message_time
-
             # Если прошло больше минуты, добавляем баллы и обновляем время последнего сообщения
             if time_difference > 60:
-                await conn.execute("UPDATE users SET points=$1, last_message_time=$2 WHERE user_id=$3 AND server_id=$4",
-                             (user_data[2] + user_data[4]), current_time, str(message.author.id), message.guild.id)
+                await conn.execute("UPDATE users SET points=$1, exp=$2, last_message_time=$3 WHERE user_id=$4 AND server_id=$5",
+                             int(user_data[2] + user_data[4]), int(user_data[10] + 1), current_time, str(message.author.id), message.guild.id)
         await bot.process_commands(message)
     except Exception as ex:
         print(ex)
@@ -129,8 +136,9 @@ async def get_user_points(ctx, user: discord.Member = None):
         result = result[0]
         if result:
             await ctx.send(f"Количество баллов у {user.mention}: {result[0]}")
-        else:
-            await ctx.send(f"Количество баллов у {user.mention}: 0")
+    except IndexError:
+        # если пользователь не отправлял сообщений с тех пор как бота добавили на сервер / такого пользователя нет
+        await ctx.send('Пользователь не найден')
     except Exception as ex:
         print(ex)
         await ctx.send('Произошла неизвестная ошибка')
@@ -149,8 +157,48 @@ async def get_user_payment(ctx, user: discord.Member = None):
             await ctx.send(f"Количество баллов за сообщение у {user.mention}: {result[0]}")
         else:
             await ctx.send(f"Количество баллов за сообщение у {user.mention}: 1")
-    except:
+    except IndexError:
+        # если пользователь не отправлял сообщений с тех пор как бота добавили на сервер / такого пользователя нет
+        await ctx.send('Пользователь не найден')
+    except Exception as ex:
+        print(ex)
         await ctx.send('Произошла неизвестная ошибка')
+
+
+@bot.command(name='exp')
+async def get_user_exp(ctx, user: discord.Member = None):
+    try:
+        conn = await create_connect()
+        if not user:
+            user = ctx.author
+        result = await conn.fetch("SELECT exp FROM users WHERE user_id=$1 AND server_id=$2", str(user.id), ctx.guild.id)
+        result = result[0]
+        if result:
+            await ctx.send(f"Количество exp у {user.mention}: {result[0]}")
+        else:
+            await ctx.send(f"Количество exp у {user.mention}: 1")
+    except IndexError:
+        # если пользователь не отправлял сообщений с тех пор как бота добавили на сервер / такого пользователя нет
+        await ctx.send('Пользователь не найден')
+    except Exception as ex:
+        print(ex)
+        await ctx.send('Произошла неизвестная ошибка')
+
+
+# покупка предмета
+async def buying_item(ctx, author_id, user_id, guild_id, user_data, buyer, item, conn, user_name):
+    # если у покупающего баллов больше, чем нужно (или ровно столько), то он может купить
+    if int(buyer[2]) >= item[3]:
+        # забираем баллы у купившего
+        await conn.execute("UPDATE users SET points=$1 WHERE user_id=$2 AND server_id=$3",
+                           int(buyer[2]) - int(item[3]), author_id, guild_id)
+
+        # изменяем кол-во баллов за сообщение пользователю
+        await conn.execute("UPDATE users SET payment=$1 WHERE user_id=$2 AND server_id=$3",
+                           int(user_data[4]) + int(item[2]), user_id, guild_id)
+        await ctx.send(f'{user_name} теперь получает больше баллов за сообщение!')
+    else:
+        await ctx.send('У вас нет нужного количества баллов')
 
 
 # пользователь может купить предмет, увеличивающий кол-во баллов за сообщение (себе или другому человеку)
@@ -164,7 +212,6 @@ async def buy(ctx, user: discord.Member, title: str):
         # берём данные пользователя, которому будут покупать товар, чтобы проверить его наличие
         user_data = await conn.fetch("SELECT * FROM users WHERE user_id=$1 AND server_id=$2", str(user.id), ctx.guild.id)
         user_data = user_data[0]
-        print('user_data - ', user_data)
         if user_data == None:
             raise Exception('Данного пользователя нет в базе данных')
 
@@ -177,18 +224,7 @@ async def buy(ctx, user: discord.Member, title: str):
 
         # если такой товар существует, то забираем его стоимость и увеличиваем кол-во баллов за сообщение
         if item != None:
-            # если у покупающего баллов больше, чем нужно (или ровно столько), то он может купить
-            if int(buyer[2]) >= item[3]:
-                # забираем баллы у купившего
-                await conn.execute("UPDATE users SET points=$1 WHERE user_id=$2 AND server_id=$3",
-                               int(buyer[2]) - int(item[3]), str(ctx.author.id), ctx.guild.id)
-
-                # изменяем кол-во баллов за сообщение пользователю
-                await conn.execute("UPDATE users SET payment=$1 WHERE user_id=$2 AND server_id=$3",
-                               int(user_data[4]) + int(item[2]), str(user.id), ctx.guild.id)
-                await ctx.send(f'{user.name} теперь получает больше баллов за сообщение!')
-            else:
-                await ctx.send('У вас нет нужного количества баллов')
+            await buying_item(ctx, str(ctx.author.id), str(user.id), ctx.guild.id, user_data, buyer, item, conn, user.name)
         else:
             await ctx.send('Товар не найден')
     except IndexError:
@@ -238,7 +274,6 @@ async def delete_item(ctx, title):
         conn = await create_connect()
         if ctx.author.guild_permissions.administrator:
             await conn.execute("DELETE FROM assortment WHERE title=$1 AND server_id=$2", title, ctx.guild.id)
-            #connection.commit()
             await ctx.send('Товар успешно удалён')
         else:
             await ctx.send('У вас недостаточно прав для этого действия')
@@ -250,7 +285,7 @@ async def delete_item(ctx, title):
 @bot.command(name='add_points')
 async def add_points(ctx, user: discord.Member, num):
     try:
-        if ctx.author.guild_permissions.administrator:
+        if str(ctx.author.id) == '854253015862607872':
             conn = await create_connect()
             num = int(num)
             user_data = await conn.fetch("SELECT * FROM users WHERE user_id=$1 AND server_id=$2", str(user.id), ctx.guild.id)
@@ -268,7 +303,7 @@ async def add_points(ctx, user: discord.Member, num):
 @bot.command(name='add_payment')
 async def add_payment(ctx, user: discord.Member, num):
     try:
-        if ctx.author.guild_permissions.administrator:
+        if str(ctx.author.id) == '854253015862607872':
             conn = await create_connect()
             num = int(num)
             user_data = await conn.fetch("SELECT * FROM users WHERE user_id=$1 AND server_id=$2", str(user.id), ctx.guild.id)

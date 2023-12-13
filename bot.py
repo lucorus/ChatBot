@@ -28,14 +28,15 @@ try:
         CREATE TABLE IF NOT EXISTS users (
         uuid TEXT PRIMARY KEY,
         user_id TEXT,
-        points bigint,
+        points BIGINT DEFAULT 1,
         last_message_time INTEGER,
-        payment bigint,
-        server_id bigint,
+        payment BIGINT DEFAULT 1,
+        server_id BIGINT,
         server_name TEXT,
         server_icon TEXT,
         user_name TEXT,
-        user_icon TEXT
+        user_icon TEXT,
+        exp BIGINT DEFAULT 1
         )
         '''
     )
@@ -79,7 +80,7 @@ async def update_user_info(ctx):
             ''', (str(ctx.author.id), str(ctx.guild.id))
         )
         user_data = cursor.fetchone()
-        print(user_data)
+
         if user_data[8] != str(ctx.author):
             cursor.execute('UPDATE users SET user_name=%s WHERE user_id=%s',
                        (str(ctx.author), str(ctx.author.id)))
@@ -102,14 +103,13 @@ async def update_server_fields(ctx):
             SELECT * FROM users WHERE server_id=%s LIMIT 1;
             ''', (str(ctx.guild.id), ))
             server_data = cursor.fetchone()
-            print(server_data)
+
             if server_data[6] != str(ctx.guild.name):
-                print('имя сервера изменено')
                 cursor.execute('UPDATE users SET server_name=%s WHERE server_id=%s',
                        (str(ctx.guild.name), str(ctx.guild.id)))
                 connection.commit()
+
             if server_data[7] != str(ctx.guild.icon):
-                print('аватар сервера изменён')
                 cursor.execute('UPDATE users SET server_icon=%s WHERE server_id=%s',
                        (str(ctx.guild.icon), str(ctx.guild.id)))
                 connection.commit()
@@ -191,6 +191,21 @@ async def get_user_payment(ctx, user: discord.Member = None):
             await ctx.send(f"Количество баллов за сообщение у {user.mention}: {result[0]}")
         else:
             await ctx.send(f"Количество баллов за сообщение у {user.mention}: 1")
+    except:
+        await ctx.send('Произошла неизвестная ошибка')
+
+
+@bot.command(name='exp')
+async def get_user_exp(ctx, user: discord.Member = None):
+    try:
+        if not user:
+            user = ctx.author
+        cursor.execute("SELECT exp FROM users WHERE user_id=%s AND server_id=%s", (str(user.id), ctx.guild.id))
+        result = cursor.fetchone()
+        if result:
+            await ctx.send(f"Количество exp у {user.mention}: {result[0]}")
+        else:
+            await ctx.send(f"Количество exp у {user.mention}: 1")
     except:
         await ctx.send('Произошла неизвестная ошибка')
 
