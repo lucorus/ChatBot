@@ -6,11 +6,18 @@ import asyncpg
 import discord
 import asyncio
 import random
+import pytz
 import uuid
 
 intents = discord.Intents.all()
-
 bot = commands.Bot('!', intents=intents)
+timezone = pytz.timezone('Europe/Moscow')
+
+
+def time_now() -> str:
+    moscow_time = datetime.now(timezone)
+    formatted_time = moscow_time.strftime('%Y/%m/%d/%H/%M')
+    return formatted_time
 
 
 async def create_connect():
@@ -22,6 +29,17 @@ async def create_connect():
         return conn
     except:
         print('Проблема с подключением к бд')
+
+
+async def get_user(user_id: str, server_id: int) -> list:
+    conn = await create_connect()
+
+    user_data = await conn.fetch(
+        '''
+        SELECT * FROM users WHERE user_id=$1 AND server_id=$2
+        ''', user_id, server_id)
+    #print(type(user_data), type(user_data[0]))
+    return user_data[0]
 
 
 @bot.event
@@ -89,9 +107,10 @@ async def on_message(message):
 
         '''
         Если пользователь отправит боту токен из своего личного аккаунта, то бот отправит запрос на апи сервера
-        и тогда аккаунт на сервере станет привязан к записи дискорд
+        и тогда аккаунт на сервере станет привязан к записи дискорд,
+        но если пользователь хочет отвязать свой аккаунт от сайта, то он может написать delete боту
         '''
-        if message.channel.type == discord.ChannelType.private:
+        if message.channel.type == discord.ChannelType.private and message.content != 'delete':
             requests.post(f'http://127.0.0.1:8000/authorize_user',
                           headers={'token': str(message.content),
                                    'user': str(message.author.id),
@@ -99,6 +118,15 @@ async def on_message(message):
                                    }
                           )
             await message.channel.send('Ваш запрос отправлен на сервер')
+        elif message.channel.type == discord.ChannelType.private and message.content == 'delete':
+            requests.post(f'http://127.0.0.1:8000/anauthorizeuser',
+                          headers={
+                                   'user': str(message.author.id),
+                                   'access': str(access_token)
+                                   }
+                          )
+            await message.channel.send('Ваш запрос отправлен на сервер')
+
 
         # Получение данных пользователя из базы данных
         conn = await create_connect()
@@ -106,20 +134,20 @@ async def on_message(message):
         if user_data == []:
             # Если пользователь не найден, добавляем его в базу данных
             await conn.execute("INSERT INTO users VALUES ($1, $2, $3, $4, 1, $5, $6, $7, $8, $9, 1)",
-                           str(uuid.uuid4()), str(message.author.id), 1, int(datetime.utcnow().timestamp()),
+                           str(uuid.uuid4()), str(message.author.id), 1, time_now(),
                             message.guild.id, str(message.guild.name), str(message.guild.icon), str(message.author),
                             str(message.author.avatar))
         else:
             user_data = user_data[0]
 
             # Если пользователь найден, проверяем время последнего сообщения
-            last_message_time = user_data[3]
-            current_time = int(datetime.utcnow().timestamp())
-            time_difference = current_time - last_message_time
+            #last_message_time = int(user_data[3][-2::])
+            #current_time = int(time_now()[-2::])
+            time_difference = datetime.strptime(time_now(), "%Y/%m/%d/%H/%M") - datetime.strptime(str(user_data[3]), "%Y/%m/%d/%H/%M")
             # Если прошло больше минуты, добавляем баллы и обновляем время последнего сообщения
-            if time_difference > 60:
+            if time_difference.total_seconds() >= 60:
                 await conn.execute("UPDATE users SET points=$1, exp=$2, last_message_time=$3 WHERE user_id=$4 AND server_id=$5",
-                             int(user_data[2] + user_data[4]), int(user_data[10] + 1), current_time, str(message.author.id), message.guild.id)
+                             int(user_data[2] + user_data[4]), int(user_data[10] + 1), time_now(), str(message.author.id), message.guild.id)
         await bot.process_commands(message)
     except Exception as ex:
         print(ex)
@@ -144,7 +172,7 @@ async def get_user_points(ctx, user: discord.Member = None):
         await ctx.send('Произошла неизвестная ошибка')
 
 
-#Получаем количество получаемых баллов за сообщение пользователя
+# Получаем количество получаемых баллов за сообщение пользователя
 @bot.command(name='payment')
 async def get_user_payment(ctx, user: discord.Member = None):
     try:
@@ -281,18 +309,21 @@ async def delete_item(ctx, title):
         await ctx.send('Произошла неизвестная ошибка')
 
 
+async def change_count_points(user_id, guild_id, conn, points: int):
+    user_data = await get_user(user_id, guild_id)
+    await conn.execute(
+        '''
+        UPDATE users SET points=$1 WHERE user_id=$2 AND server_id=$3
+        ''', (user_data[2] + points), user_id, guild_id)
+
+
 # изменяет количество баллов у пользователя (может как увеличить, так и уменьшить)
 @bot.command(name='add_points')
-async def add_points(ctx, user: discord.Member, num):
+async def add_points(ctx, user: discord.Member, points):
     try:
         if str(ctx.author.id) == '854253015862607872':
             conn = await create_connect()
-            num = int(num)
-            user_data = await conn.fetch("SELECT * FROM users WHERE user_id=$1 AND server_id=$2", str(user.id), ctx.guild.id)
-            user_data = user_data[0]
-            await conn.execute("UPDATE users SET points=$1 WHERE user_id=$2 AND server_id=$3",
-                           (user_data[2] + num), str(user.id), ctx.guild.id)
-            await ctx.send('Действие успешно выполнено!')
+            await change_count_points(str(user.id), int(ctx.guild.id), conn, int(points))
         else:
             await ctx.send('У вас недостаточно прав для этого действия')
     except Exception as ex:
@@ -374,21 +405,18 @@ async def casino(ctx, bet):
             count_figure = max_count_figure(number)
 
             if count_figure == 1:
-                await conn.execute("UPDATE users SET points=$1 WHERE user_id=$2 AND server_id=$3",
-                               user_data[2] - bet, str(ctx.author.id), ctx.guild.id)
+                await change_count_points(str(ctx.author.id), int(ctx.guild.id), conn, -bet)
                 if bet >= 1000:
                     await ctx.reply(f'Выпало число {number} \nВы проиграли {bet} баллов ))))')
                 else:
                     await ctx.reply(f'Выпало число {number} \nВы проиграли {bet} баллов')
 
             elif count_figure == 2:
-                await conn.execute("UPDATE users SET points=$1 WHERE user_id=$2 AND server_id=$3",
-                               user_data[2] + ((bet * 2) // 1), str(ctx.author.id), ctx.guild.id)
+                await change_count_points(str(ctx.author.id), int(ctx.guild.id), conn, -(bet * 2))
                 await ctx.reply(f'Выпало число {number} \nВы выиграли {int((bet * 2) // 1)} баллов!')
 
             elif count_figure == 3:
-                await conn.execute("UPDATE users SET points=$1 WHERE user_id=$2 AND server_id=$3",
-                               user_data[2] + (bet * 4), str(ctx.author.id), ctx.guild.id)
+                await change_count_points(str(ctx.author.id), int(ctx.guild.id), conn, -(bet * 4))
                 await ctx.reply(f'Выпало число {number} \nВы выиграли {bet * 4} баллов!')
 
         else:
@@ -398,5 +426,147 @@ async def casino(ctx, bet):
         print(ex)
 
 
-# Запуск бота
+# Вычисляет сколько баллов получил пользователь по депозиту с процентом contribution_coefficient
+def calculate_percent(points, time_delta):
+    points = points * (contribution_coefficient/100) + points
+    time_delta -= 1
+    if time_delta > 0:
+        return calculate_percent(points, time_delta)
+    else:
+        return round(points)
+
+
+# Изменяет кол-во баллов пользователя по его вкладу (возвращает True если было изменение, а иначе False)
+async def calculate_deposit(deposit_uuid: str, points: int, deposit_last_update_time_time: str) -> bool:
+    # находим кол-во дней со дня создания счёта
+    time_delta = datetime.strptime(time_now(), "%Y/%m/%d/%H/%M")\
+                 - datetime.strptime(deposit_last_update_time_time, "%Y/%m/%d/%H/%M")
+    time_delta = time_delta.total_seconds() // 86400
+    if time_delta >= 1:
+        points = calculate_percent(points, time_delta)
+        conn = await create_connect()
+        await conn.execute(
+            '''
+            UPDATE deposit SET current_points=$1 AND last_update=$2 WHERE uuid=$3
+            ''', points, time_now(), deposit_uuid)
+        return True
+    return False
+
+
+# Возвращает информацию о депозите определённого пользователя
+async def get_deposit_info(user_id: str, guild_id: int):
+    try:
+        conn = await create_connect()
+        user_data = await get_user(user_id, guild_id)
+        deposit = await conn.fetch(
+            '''
+            SELECT * FROM deposit WHERE investor=$1
+            ''', user_data[0])
+        change = await calculate_deposit(deposit[0][0], deposit[0][5], deposit[0][4])
+        if change:
+            deposit = await conn.fetch(
+                '''
+                SELECT * FROM deposit WHERE investor=$1
+                ''', user_data)
+        return deposit[0]
+    except Exception as ex:
+        print(ex)
+
+
+def validate_time(number: str):
+    if int(number) < 10:
+        return number[1:]
+    return number
+
+
+# Получает время в формате %Y/%m/%d/%H/%M и возвращает в читабельном виде
+def time(time: str) -> str:
+    months = {'01': 'января', '02': 'февраля', '03': 'марта', '04': 'апреля', '05': 'мая', '06': 'июня', '07': 'июля',
+              '08': 'августа', '09': 'сентября', '10': 'октября', '11': 'ноября', '12': 'декабря'}
+    return(f'{ time[-5:-3] }:{ time[-2:] } {validate_time(time[-8:-6])}'
+           f' {months[time[-11:-9]]} {time[:4]} года')
+
+
+@bot.command(name='deposit_info')
+async def deposit_info(ctx):
+    deposit = await get_deposit_info(str(ctx.author.id), int(ctx.guild.id))
+
+    if not deposit:
+        await ctx.send('Депозита не существует')
+    else:
+        await ctx.send(f' ## Информация о вашем счёте: ##'
+                       f'\n **Дата создания:** { time(deposit[3]) }'
+                       #f'\n **Последнее обновление:** { time(deposit[4]) }'
+                       f'\n **Изначальный размер депозита:** { deposit[2] }'
+                       f'\n **Доступно для вывода:** { deposit[5] }')
+
+
+# проверяем валидность суммы, которую пользователь хочет внести на счёт
+def is_valid_deposit(points: int) -> bool:
+    try:
+        if points <= 10:
+            return False
+    except:
+        return False
+
+
+# создаёт депозит
+async def create(ctx, conn, user, points: int):
+    try:
+        if user[2] >= points:
+            await conn.fetch(
+                '''
+                INSERT INTO deposit VALUES($1, $2, $3, $4, $5, $6)
+                ''', str(uuid.uuid4()), user[0], points, time_now(), time_now(), points
+            )
+            await change_count_points(user[1], user[5], conn, -points)
+            await ctx.send('Счёт создан!')
+        else:
+            await ctx.send('У вас недостаточно баллов!')
+    except:
+        await ctx.send('Произошла неизвестная ошибка')
+
+
+@bot.command(name='create_deposit')
+async def create_deposit(ctx, points: int):
+    try:
+        if not is_valid_deposit(points):
+            assert 'Невалидный депозит'
+        user_id = str(ctx.author.id)
+        guild_id = int(ctx.guild.id)
+        deposit = await get_deposit_info(user_id, guild_id)
+
+        if deposit:
+            await ctx.send('Депозит уже существует')
+        else:
+            user_data = await get_user(user_id, guild_id)
+            conn = await create_connect()
+            await create(ctx, conn, user_data, points)
+    except Exception as ex:
+        print(ex)
+        await ctx.send('Вы ввели некорректный размер депозита')
+
+
+@bot.command(name='delete_deposit')
+async def delete_deposit(ctx):
+    try:
+        user_id = str(ctx.author.id)
+        guild_id = int(ctx.guild.id)
+        deposit = await get_deposit_info(user_id, guild_id)
+        if deposit != []:
+            conn = await create_connect()
+            await change_count_points(str(ctx.author.id), int(ctx.guild.id), conn, deposit[5])
+            await conn.execute(
+                '''
+                DELETE FROM deposit WHERE uuid=$1
+                ''', deposit[0]
+            )
+            await ctx.send('Депозит удалён')
+        else:
+            await ctx.send('Депозит не существует')
+    except Exception as ex:
+        print(ex)
+        await ctx.send('Произошла неизвестная ошибка')
+
+
 bot.run(token)

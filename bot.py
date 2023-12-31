@@ -29,7 +29,7 @@ try:
         uuid TEXT PRIMARY KEY,
         user_id TEXT,
         points BIGINT DEFAULT 1,
-        last_message_time INTEGER,
+        last_message_time TEXT,
         payment BIGINT DEFAULT 1,
         server_id BIGINT,
         server_name TEXT,
@@ -49,6 +49,21 @@ try:
         upgrade INTEGER, 
         price INTEGER,
         server_id bigint
+        )
+        '''
+    )
+
+    # last_update - последнее время, когда вычислялось количество баллов на счету
+    # current_points - сколько баллов накопилось на данный момент на счету
+    cursor.execute(
+        '''
+        CREATE TABLE IF NOT EXISTS deposit (
+        uuid TEXT PRIMARY KEY,
+        investor TEXT REFERENCES users(uuid),
+        points BIGINT, 
+        created_add TEXT,
+        last_update TEXT,
+        current_points BIGINT 
         )
         '''
     )
@@ -397,6 +412,11 @@ async def casino(ctx, bet):
     except Exception as ex:
         await ctx.reply('Вы ввели некорректную ставку')
         print(ex)
+
+
+@bot.command(name='text')
+async def text(ctx):
+    await ctx.reply('text')
 
 
 # Запуск бота
